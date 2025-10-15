@@ -8,6 +8,7 @@ let votesRevealed = false;
 let ws = null;
 let clientId = null;
 let roomId = null;
+let currentUserParticipant = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 5;
 
@@ -20,14 +21,55 @@ function init() {
     const urlParams = new URLSearchParams(window.location.search);
     roomId = urlParams.get('room') || 'default';
 
+    // Check if user has a saved name
+    const savedName = localStorage.getItem('userName');
+    if (savedName) {
+        // Auto-join with saved name
+        hideRegistrationModal();
+        connectWebSocket();
+        setTimeout(() => {
+            autoRegisterUser(savedName);
+        }, 500);
+    } else {
+        // Show registration modal
+        showRegistrationModal();
+    }
+
     renderCards();
     attachEventListeners();
-    connectWebSocket();
 }
 
 // Generate unique client ID
 function generateClientId() {
     return 'client_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+// Show/hide registration modal
+function showRegistrationModal() {
+    document.getElementById('registerModal').classList.remove('hidden');
+}
+
+function hideRegistrationModal() {
+    document.getElementById('registerModal').classList.add('hidden');
+}
+
+// Auto-register user
+function autoRegisterUser(name) {
+    const participant = {
+        id: Date.now(),
+        name: name,
+        vote: null,
+        hasVoted: false,
+        clientId: clientId
+    };
+
+    currentUserParticipant = participant;
+    document.getElementById('currentPlayerName').textContent = name;
+
+    sendToServer({
+        type: 'addParticipant',
+        participant: participant
+    });
 }
 
 // Connect to WebSocket server
@@ -78,22 +120,34 @@ function handleServerMessage(data) {
             votesRevealed = data.room.votesRevealed;
             document.getElementById('taskInput').value = data.room.task || '';
 
+            // Update current user participant
+            currentUserParticipant = participants.find(p => p.isCurrentUser);
+            if (currentUserParticipant) {
+                document.getElementById('currentPlayerName').textContent = currentUserParticipant.name;
+            }
+
             if (votesRevealed) {
-                document.getElementById('showVotes').textContent = 'Скрыть голоса';
-                document.getElementById('resultsSection').style.display = 'block';
-                calculateResults();
+                showResults();
             }
 
             renderParticipants();
+            updateSelectedCard();
             break;
 
         case 'participantAdded':
             const existingParticipant = participants.find(p => p.id === data.participant.id);
             if (!existingParticipant) {
-                participants.push({
+                const newParticipant = {
                     ...data.participant,
                     isCurrentUser: data.participant.clientId === clientId
-                });
+                };
+                participants.push(newParticipant);
+
+                if (newParticipant.isCurrentUser) {
+                    currentUserParticipant = newParticipant;
+                    document.getElementById('currentPlayerName').textContent = newParticipant.name;
+                }
+
                 renderParticipants();
             }
             break;
@@ -112,6 +166,7 @@ function handleServerMessage(data) {
                 participant.vote = data.vote;
                 participant.hasVoted = data.hasVoted;
                 renderParticipants();
+                updateSelectedCard();
             }
             break;
 
@@ -121,18 +176,11 @@ function handleServerMessage(data) {
 
         case 'votesRevealed':
             votesRevealed = data.revealed;
-            const btn = document.getElementById('showVotes');
-            const resultsSection = document.getElementById('resultsSection');
-
             if (votesRevealed) {
-                btn.textContent = 'Скрыть голоса';
-                resultsSection.style.display = 'block';
-                calculateResults();
+                showResults();
             } else {
-                btn.textContent = 'Показать голоса';
-                resultsSection.style.display = 'none';
+                hideResults();
             }
-
             renderParticipants();
             break;
 
@@ -144,13 +192,12 @@ function handleServerMessage(data) {
             currentVote = null;
             votesRevealed = false;
 
-            document.getElementById('showVotes').textContent = 'Показать голоса';
-            document.getElementById('resultsSection').style.display = 'none';
-
             document.querySelectorAll('.card').forEach(card => {
-                card.classList.remove('selected');
+                card.classList.remove('selected', 'disabled');
             });
 
+            document.getElementById('selectedCardDisplay').innerHTML = '';
+            hideResults();
             renderParticipants();
             break;
     }
@@ -171,23 +218,22 @@ function attemptReconnect() {
 
 // Update connection status indicator
 function updateConnectionStatus(connected) {
-    const header = document.querySelector('header');
     let statusIndicator = document.getElementById('connectionStatus');
 
     if (!statusIndicator) {
         statusIndicator = document.createElement('div');
         statusIndicator.id = 'connectionStatus';
-        statusIndicator.style.cssText = 'position: absolute; top: 10px; right: 10px; padding: 5px 10px; border-radius: 5px; font-size: 0.9em;';
-        header.style.position = 'relative';
-        header.appendChild(statusIndicator);
+        document.body.appendChild(statusIndicator);
     }
 
     if (connected) {
         statusIndicator.textContent = '🟢 Подключено';
-        statusIndicator.style.background = 'rgba(76, 175, 80, 0.3)';
+        statusIndicator.style.background = 'rgba(76, 175, 80, 0.8)';
+        statusIndicator.style.color = '#fff';
     } else {
         statusIndicator.textContent = '🔴 Отключено';
-        statusIndicator.style.background = 'rgba(244, 67, 54, 0.3)';
+        statusIndicator.style.background = 'rgba(244, 67, 54, 0.8)';
+        statusIndicator.style.color = '#fff';
     }
 }
 
@@ -208,8 +254,13 @@ function renderCards() {
     cardValues.forEach(value => {
         const card = document.createElement('div');
         card.className = 'card';
-        card.textContent = value;
         card.dataset.value = value;
+
+        const cardValue = document.createElement('div');
+        cardValue.className = 'card-value';
+        cardValue.textContent = value;
+        card.appendChild(cardValue);
+
         card.addEventListener('click', () => selectCard(value, card));
         cardsContainer.appendChild(card);
     });
@@ -217,6 +268,8 @@ function renderCards() {
 
 // Select a card
 function selectCard(value, cardElement) {
+    if (!currentUserParticipant) return;
+
     // Remove selection from all cards
     document.querySelectorAll('.card').forEach(card => {
         card.classList.remove('selected');
@@ -226,27 +279,63 @@ function selectCard(value, cardElement) {
     cardElement.classList.add('selected');
     currentVote = value;
 
-    // Update current user's vote if exists
-    updateCurrentUserVote(value);
+    // Update selected card display
+    updateSelectedCard();
+
+    // Send vote to server
+    sendToServer({
+        type: 'vote',
+        participantId: currentUserParticipant.id,
+        vote: value
+    });
 }
 
-// Update current user vote
-function updateCurrentUserVote(value) {
-    const currentUser = participants.find(p => p.isCurrentUser);
-    if (currentUser) {
-        sendToServer({
-            type: 'vote',
-            participantId: currentUser.id,
-            vote: value
-        });
+// Update selected card display on table
+function updateSelectedCard() {
+    if (!currentUserParticipant || !currentUserParticipant.hasVoted) {
+        document.getElementById('selectedCardDisplay').innerHTML = '';
+        return;
     }
+
+    const display = document.getElementById('selectedCardDisplay');
+    display.innerHTML = '';
+
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.dataset.value = currentUserParticipant.vote;
+
+    const cardValue = document.createElement('div');
+    cardValue.className = 'card-value';
+    cardValue.textContent = currentUserParticipant.vote;
+    card.appendChild(cardValue);
+
+    display.appendChild(card);
 }
 
 // Attach event listeners
 function attachEventListeners() {
-    document.getElementById('addParticipant').addEventListener('click', addParticipant);
-    document.getElementById('showVotes').addEventListener('click', toggleVotes);
-    document.getElementById('resetVotes').addEventListener('click', resetVotes);
+    // Registration
+    document.getElementById('joinButton').addEventListener('click', () => {
+        const name = document.getElementById('usernameInput').value.trim();
+        if (name) {
+            localStorage.setItem('userName', name);
+            hideRegistrationModal();
+            connectWebSocket();
+            setTimeout(() => {
+                autoRegisterUser(name);
+            }, 500);
+        }
+    });
+
+    document.getElementById('usernameInput').addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+            document.getElementById('joinButton').click();
+        }
+    });
+
+    // Reveal/Reset buttons
+    document.getElementById('revealButton').addEventListener('click', toggleVotes);
+    document.getElementById('resetButton').addEventListener('click', resetVotes);
 
     // Task input with debounce
     let taskTimeout;
@@ -261,81 +350,57 @@ function attachEventListeners() {
     });
 }
 
-// Add a new participant
-function addParticipant() {
-    const name = prompt('Введите имя участника:');
-    if (name && name.trim()) {
-        const participant = {
-            id: Date.now(),
-            name: name.trim(),
-            vote: null,
-            hasVoted: false,
-            clientId: clientId
-        };
-
-        sendToServer({
-            type: 'addParticipant',
-            participant: participant
-        });
-    }
-}
-
-// Remove participant
-function removeParticipant(id) {
-    sendToServer({
-        type: 'removeParticipant',
-        participantId: id
-    });
-}
-
 // Render participants list
 function renderParticipants() {
-    const participantsList = document.getElementById('participantsList');
+    const otherPlayersContainer = document.getElementById('otherPlayers');
+    otherPlayersContainer.innerHTML = '';
 
-    if (participants.length === 0) {
-        participantsList.innerHTML = '<p style="text-align: center; color: #999;">Добавьте участников для начала голосования</p>';
+    const otherParticipants = participants.filter(p => !p.isCurrentUser);
+
+    if (otherParticipants.length === 0) {
+        otherPlayersContainer.innerHTML = '<p style="color: #a0d4a8; text-align: center;">Ждем других игроков...</p>';
         return;
     }
 
-    participantsList.innerHTML = '';
-
-    participants.forEach(participant => {
-        const participantDiv = document.createElement('div');
-        participantDiv.className = 'participant';
+    otherParticipants.forEach(participant => {
+        const playerCard = document.createElement('div');
+        playerCard.className = 'player-card';
         if (participant.hasVoted) {
-            participantDiv.classList.add('voted');
+            playerCard.classList.add('voted');
         }
 
-        const infoDiv = document.createElement('div');
-        infoDiv.className = 'participant-info';
+        const playerName = document.createElement('div');
+        playerName.className = 'player-name';
+        playerName.textContent = participant.name;
 
-        const nameDiv = document.createElement('div');
-        nameDiv.className = 'participant-name';
-        nameDiv.textContent = participant.name + (participant.isCurrentUser ? ' (Вы)' : '');
-
-        const voteDiv = document.createElement('div');
-        voteDiv.className = 'participant-vote';
+        const playerStatus = document.createElement('div');
+        playerStatus.className = 'player-status';
 
         if (!participant.hasVoted) {
-            voteDiv.textContent = 'Ожидание голоса...';
+            playerStatus.textContent = 'Думает...';
         } else if (votesRevealed) {
-            voteDiv.textContent = `Голос: ${participant.vote}`;
+            playerStatus.textContent = 'Голос раскрыт';
         } else {
-            voteDiv.className = 'participant-vote hidden';
-            voteDiv.textContent = 'Проголосовал ✓';
+            playerStatus.textContent = '✓ Проголосовал';
         }
 
-        infoDiv.appendChild(nameDiv);
-        infoDiv.appendChild(voteDiv);
+        playerCard.appendChild(playerName);
+        playerCard.appendChild(playerStatus);
 
-        const removeBtn = document.createElement('button');
-        removeBtn.className = 'btn-remove';
-        removeBtn.textContent = 'Удалить';
-        removeBtn.addEventListener('click', () => removeParticipant(participant.id));
+        // Show card
+        if (votesRevealed && participant.hasVoted) {
+            const cardReveal = document.createElement('div');
+            cardReveal.className = 'player-card-revealed';
+            cardReveal.textContent = participant.vote;
+            playerCard.appendChild(cardReveal);
+        } else if (participant.hasVoted) {
+            const cardBack = document.createElement('div');
+            cardBack.className = 'player-card-back';
+            cardBack.textContent = '🎴';
+            playerCard.appendChild(cardBack);
+        }
 
-        participantDiv.appendChild(infoDiv);
-        participantDiv.appendChild(removeBtn);
-        participantsList.appendChild(participantDiv);
+        otherPlayersContainer.appendChild(playerCard);
     });
 }
 
@@ -357,6 +422,19 @@ function toggleVotes() {
     });
 }
 
+// Show results panel
+function showResults() {
+    document.getElementById('resultsPanel').style.display = 'block';
+    document.getElementById('revealButton').textContent = '🔒 Скрыть карты';
+    calculateResults();
+}
+
+// Hide results panel
+function hideResults() {
+    document.getElementById('resultsPanel').style.display = 'none';
+    document.getElementById('revealButton').textContent = '🔍 Показать карты';
+}
+
 // Calculate and display results
 function calculateResults() {
     const votedParticipants = participants.filter(p => p.hasVoted && !isNaN(p.vote));
@@ -365,7 +443,7 @@ function calculateResults() {
         document.getElementById('avgValue').textContent = '-';
         document.getElementById('medianValue').textContent = '-';
         document.getElementById('consensusValue').textContent = '-';
-        document.getElementById('votesDisplay').innerHTML = '<p>Нет голосов для подсчета</p>';
+        document.getElementById('allVotesDisplay').innerHTML = '<p style="text-align: center;">Нет голосов для подсчета</p>';
         return;
     }
 
@@ -388,7 +466,7 @@ function calculateResults() {
     document.getElementById('consensusValue').textContent = consensus;
 
     // Display all votes
-    const votesDisplay = document.getElementById('votesDisplay');
+    const votesDisplay = document.getElementById('allVotesDisplay');
     votesDisplay.innerHTML = '';
 
     participants.forEach(participant => {
@@ -406,7 +484,7 @@ function calculateResults() {
 
 // Reset all votes
 function resetVotes() {
-    if (!confirm('Сбросить все голоса?')) {
+    if (!confirm('Начать новую игру? Все голоса будут сброшены.')) {
         return;
     }
 
